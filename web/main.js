@@ -28,14 +28,19 @@ const ui = {
   loading: $("loading"), subtitle: $("subtitle"), search: $("breedSearch"), breedList: $("breedList"),
   threshold: $("threshold"), thresholdOut: $("thresholdOut"),
   links: $("tLinks"), photos: $("tPhotos"), rotate: $("tRotate"), reset: $("resetView"),
+  optsBtn: $("optsBtn"), legendInline: $("legendInline"),
+  sheetHandle: $("sheetHandle"), grabber: $("grabber"), panelHead: $("panelHead"), panelBody: $("panelBody"),
 };
+// Matches the CSS breakpoint where the panel becomes a bottom sheet.
+const phoneQuery = window.matchMedia("(max-width: 760px)");
+const isPhone = () => phoneQuery.matches;
 
 const state = { breed: -1, threshold: 0, links: true, photos: true, rotate: !REDUCED_MOTION, selected: -1, hovered: -1 };
 
 let n, E, pos, labels, species, classes, classSpecies, params, atlas, allNodes, breedMembers;
 let src, dst, w, sameBreedPrefix, adjacency;
 let theme, renderer, scene, camera, controls, nodes, edges, highlight, halo;
-let baseSizes, scaleCss = 1, atlasReady = false, fly = null, home = null;
+let baseSizes, scaleCss = 1, photoMaxPx = PHOTO_MAX_PX, atlasReady = false, fly = null, home = null, sheetOpen = false;
 const fog = { uFogNear: { value: 0 }, uFogFar: { value: 1 } };
 let sceneRadius = 100;
 
@@ -85,6 +90,10 @@ function loadData(data) {
   labels = Int32Array.from(data.nodes.label);
   n = labels.length;
   pos = Float32Array.from(data.nodes.pos);
+  // The layout's longest axis is x. On a portrait screen, turn it upright (90° about z) so it fills the height.
+  if (window.innerHeight > window.innerWidth) {
+    for (let i = 0; i < pos.length; i += 3) [pos[i], pos[i + 1]] = [-pos[i + 1], pos[i]];
+  }
   species = labels.map((l) => (classSpecies[l] === "cat" ? 0 : 1));
   allNodes = Array.from({ length: n }, (_, i) => i);
   breedMembers = classes.map(() => []);
@@ -364,6 +373,7 @@ function initScene() {
 
   new ResizeObserver(resize).observe(ui.stage);
   new ResizeObserver(updateViewOffset).observe(ui.panel);
+  new ResizeObserver(updateViewOffset).observe(ui.toolbar);
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 }
 
@@ -393,6 +403,9 @@ function resize() {
   renderer.setSize(W, H, false);
   camera.aspect = W / H;
   scaleCss = H / (2 * Math.tan(THREE.MathUtils.degToRad(FOV / 2)));
+  // On small screens, photos stop growing sooner so a handful don't fill the whole view.
+  photoMaxPx = Math.round(Math.min(PHOTO_MAX_PX, Math.max(56, Math.min(W, H) * 0.16)));
+  nodes.material.uniforms.uPhotoMaxPx.value = photoMaxPx;
   nodes.material.uniforms.uScale.value = dpr * scaleCss;
   nodes.material.uniforms.uDpr.value = dpr;
   halo.material.uniforms.uDpr.value = dpr;
@@ -400,14 +413,15 @@ function resize() {
   updateViewOffset();
 }
 
-// The unobstructed part of the canvas: right of nothing, below the toolbar, left of (or above) the panel.
+// The unobstructed part of the canvas: below the toolbar, and left of the side panel or above the bottom sheet.
 function freeArea() {
   const W = ui.stage.clientWidth, H = ui.stage.clientHeight;
   const p = ui.panel.getBoundingClientRect(), t = ui.toolbar.getBoundingClientRect();
-  const panelOnRight = p.top < H / 2;
-  const pad = 24;
+  const panelOnRight = p.width < W * 0.6;
+  const pad = isPhone() ? 12 : 24;
+  const hintRoom = isPhone() ? 0 : 16;
   const left = pad, right = (panelOnRight ? p.left : W) - pad;
-  const top = t.bottom + pad, bottom = (panelOnRight ? H : p.top) - pad - 16; // 16: room for the hint line
+  const top = t.bottom + pad, bottom = (panelOnRight ? H : p.top) - pad - hintRoom;
   return { W, H, fw: right - left, fh: bottom - top, cx: (left + right) / 2, cy: (top + bottom) / 2 };
 }
 
@@ -452,7 +466,7 @@ function currentDir() {
 
 // On-screen diameter in CSS px of a node of `size` and `dim` at `depth`, matching the vertex shader.
 function displayPx(size, depth, dim = 1) {
-  const cap = (photosActive() && dim >= 0.75 ? PHOTO_MAX_PX : DOT_MAX_PX) * size / POINT_SIZE;
+  const cap = (photosActive() && dim >= 0.75 ? photoMaxPx : DOT_MAX_PX) * size / POINT_SIZE;
   return Math.min(Math.max(size * scaleCss / depth, 4), cap);
 }
 
@@ -603,14 +617,14 @@ function flyToBreed(k) {
 const projMatrix = new THREE.Matrix4();
 
 // The node under the pointer: of the nodes whose drawn sprite covers it, the one nearest the camera;
-// failing that, the closest node within HOVER_RADIUS.
-function pick(px, py) {
+// failing that, the closest node within `radius` CSS px.
+function pick(px, py, radius = HOVER_RADIUS) {
   const W = ui.stage.clientWidth, H = ui.stage.clientHeight;
   camera.updateMatrixWorld();
   const m = projMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).elements;
   const sizes = nodes.geometry.attributes.aSize.array;
   const dims = nodes.geometry.attributes.aDim.array;
-  let cover = -1, coverDepth = Infinity, near = -1, nearD = HOVER_RADIUS * HOVER_RADIUS;
+  let cover = -1, coverDepth = Infinity, near = -1, nearD = radius * radius;
   for (let i = 0; i < n; i++) {
     const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
     const cw = m[3] * x + m[7] * y + m[11] * z + m[15];
@@ -680,8 +694,24 @@ function setBreed(k) {
   renderPanel();
   if (k >= 0) {
     setRotate(false);
+    if (isPhone()) {
+      ui.search.blur();
+      setSheet(false); // first, so the fly-in fits the breed into the full graph area
+    }
     flyToBreed(k);
   }
+}
+
+function setSheet(open) {
+  sheetOpen = open;
+  ui.panel.classList.toggle("expanded", open);
+  ui.grabber.setAttribute("aria-expanded", String(open));
+  ui.grabber.setAttribute("aria-label", open ? "Hide details" : "Show details");
+}
+
+function setOptions(open) {
+  ui.toolbar.classList.toggle("open", open);
+  ui.optsBtn.setAttribute("aria-expanded", String(open));
 }
 
 function setRotate(on) {
@@ -716,11 +746,32 @@ function initUI() {
     setHovered(pick(ev.clientX, ev.clientY), ev);
   });
   canvas.addEventListener("pointerleave", (ev) => setHovered(-1, ev));
-  canvas.addEventListener("pointerdown", (ev) => { down = [ev.clientX, ev.clientY]; });
-  canvas.addEventListener("pointerup", (ev) => {
-    if (!down || Math.hypot(ev.clientX - down[0], ev.clientY - down[1]) > 4) return;
-    select(pick(ev.clientX, ev.clientY));
+  canvas.addEventListener("pointerdown", (ev) => {
+    down = [ev.clientX, ev.clientY];
+    setOptions(false);
   });
+  canvas.addEventListener("pointerup", (ev) => {
+    const touch = ev.pointerType === "touch";
+    if (!down || Math.hypot(ev.clientX - down[0], ev.clientY - down[1]) > (touch ? 10 : 4)) return;
+    select(pick(ev.clientX, ev.clientY, touch ? 24 : HOVER_RADIUS));
+  });
+
+  // Bottom sheet (phones): tap or swipe the handle/header to expand and collapse.
+  let drag = null;
+  ui.sheetHandle.addEventListener("pointerdown", (ev) => {
+    if (!isPhone() || ev.target.closest(".close")) return;
+    drag = ev.clientY;
+  });
+  ui.sheetHandle.addEventListener("pointerup", (ev) => {
+    if (drag === null) return;
+    const dy = ev.clientY - drag;
+    drag = null;
+    setSheet(dy < -24 ? true : dy > 24 ? false : !sheetOpen);
+  });
+  ui.sheetHandle.addEventListener("pointercancel", () => { drag = null; });
+  ui.grabber.addEventListener("click", (ev) => { if (ev.detail === 0) setSheet(!sheetOpen); }); // keyboard only
+
+  ui.optsBtn.addEventListener("click", () => setOptions(!ui.toolbar.classList.contains("open")));
   window.addEventListener("keydown", (ev) => {
     if (ev.key !== "Escape" || ev.target === ui.search) return;
     if (state.selected >= 0) select(-1);
@@ -794,29 +845,40 @@ function el(tag, props = {}, ...children) {
 const swatch = (color) => el("span", { className: "dot", style: { background: `#${color.getHexString()}` } });
 const speciesColor = (k) => (classSpecies[k] === "cat" ? theme.cat : theme.dog);
 
+// The floating legend (desktop) and the one inside the toolbar (phones) show the same entries.
 function renderLegend() {
-  const row = (color, text) => el("div", {}, swatch(color), text);
+  let items;
   if (state.breed >= 0) {
-    ui.legend.replaceChildren(
-      row(theme.focus, `${classes[state.breed]} (${fmt(breedMembers[state.breed].length)})`),
-      row(theme.other, "Other photos"),
-    );
+    items = [[theme.focus, `${classes[state.breed]} (${fmt(breedMembers[state.breed].length)})`], [theme.other, "Other photos"]];
   } else {
     const cats = species.filter((s) => s === 0).length;
-    ui.legend.replaceChildren(row(theme.cat, `Cats (${fmt(cats)})`), row(theme.dog, `Dogs (${fmt(n - cats)})`));
+    items = [[theme.cat, `Cats (${fmt(cats)})`], [theme.dog, `Dogs (${fmt(n - cats)})`]];
   }
+  ui.legend.replaceChildren(...items.map(([c, text]) => el("div", {}, swatch(c), text)));
+  ui.legendInline.replaceChildren(...items.map(([c, text]) => el("span", {}, swatch(c), text)));
 }
 
+// Each view is a head (title row; on phones also the collapsed bottom sheet) and a body.
 function renderPanel() {
   const view = state.selected >= 0 ? selectionView(state.selected) : state.breed >= 0 ? breedView(state.breed) : overviewView();
-  ui.panel.replaceChildren(...view);
+  ui.panelHead.replaceChildren(view.head);
+  ui.panelBody.replaceChildren(...view.body);
   ui.panel.scrollTop = 0;
+  ui.panelBody.scrollTop = 0;
 }
 
-function head(title, meta, onclose) {
-  const close = el("button", { className: "icon-btn close", "aria-label": "Close", onclick: onclose });
-  close.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg>`;
-  return el("div", { className: "head" }, el("div", {}, el("h2", { textContent: title }), el("div", { className: "meta" }, ...meta)), close);
+function head({ title, meta, onclose = null, thumbSrc = null, metaPeekOnly = false }) {
+  let close = null;
+  if (onclose) {
+    close = el("button", { className: "icon-btn close", "aria-label": "Close", onclick: onclose });
+    close.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg>`;
+  }
+  return el("div", { className: "head" },
+    thumbSrc && el("img", { className: "head-thumb", src: thumbSrc, alt: "" }),
+    el("div", { className: "head-text" },
+      el("h2", { textContent: title }),
+      el("div", { className: metaPeekOnly ? "meta peek-only" : "meta" }, ...meta)),
+    close);
 }
 
 function statTiles(items) {
@@ -844,19 +906,21 @@ function overviewView() {
     .map(({ name, k }) => el("button", { className: "chip", onclick: () => setBreed(k) },
       swatch(speciesColor(k)), name, el("span", { className: "count", textContent: fmt(breedMembers[k].length) }))));
 
-  return [
-    el("h2", { textContent: "Overview" }),
-    el("p", { textContent: "Every point is a photo, placed by UMAP of its CLIP embedding, so similar photos sit close together. Links join pairs whose cosine similarity clears the slider. Zoom in and the points turn into the photos themselves." }),
-    statTiles([
-      [fmt(n), "photos"],
-      [fmt(count), "links"],
-      [count ? pct(sameBreedPrefix[count] / count) : "–", "of links stay within a breed"],
-      [fmt(isolated), "photos with no link"],
-    ]),
-    el("h3", { textContent: "Cat breeds" }), chips("cat"),
-    el("h3", { textContent: "Dog breeds" }), chips("dog"),
-    el("div", { className: "foot", textContent: `${params.model} · built with cosine > ${params.threshold}, up to ${params.maxDegree || "∞"} links proposed per photo` }),
-  ];
+  return {
+    head: head({ title: "Overview", meta: [`${fmt(n)} photos · ${fmt(count)} links`], metaPeekOnly: true }),
+    body: [
+      el("p", { textContent: "Every point is a photo, placed by UMAP of its CLIP embedding, so similar photos sit close together. Links join pairs whose cosine similarity clears the slider. Zoom in and the points turn into the photos themselves." }),
+      statTiles([
+        [fmt(n), "photos"],
+        [fmt(count), "links"],
+        [count ? pct(sameBreedPrefix[count] / count) : "–", "of links stay within a breed"],
+        [fmt(isolated), "photos with no link"],
+      ]),
+      el("h3", { textContent: "Cat breeds" }), chips("cat"),
+      el("h3", { textContent: "Dog breeds" }), chips("dog"),
+      el("div", { className: "foot", textContent: `${params.model} · built with cosine > ${params.threshold}, up to ${params.maxDegree || "∞"} links proposed per photo` }),
+    ],
+  };
 }
 
 function breedView(b) {
@@ -878,32 +942,41 @@ function breedView(b) {
   const top = [...other].sort((x, y) => y[1] - x[1]).slice(0, 5);
   const best = [...members].sort((x, y) => deg[y] - deg[x]).slice(0, 9);
 
-  return [
-    head(classes[b], [swatch(speciesColor(b)), `${speciesName(b)} · ${fmt(members.length)} photos`], () => setBreed(-1)),
-    statTiles([
-      [within + across ? pct(within / (within + across)) : "–", "of its links stay in the breed"],
-      [fmt(unlinked), "photos with no link"],
-    ]),
-    el("h3", { textContent: "Most often linked to" }),
-    top.length
-      ? el("div", { className: "rows" }, ...top.map(([k, c]) =>
-          el("button", { onclick: () => setBreed(k) }, el("span", { textContent: classes[k] }), el("span", { className: "count", textContent: `${fmt(c)} link${c === 1 ? "" : "s"}` }))))
-      : el("div", { className: "empty", textContent: "No links to other breeds at this threshold." }),
-    el("h3", { textContent: "Best-connected photos" }),
-    photoGrid(best.map((i) => ({ i, caption: `${deg[i]} link${deg[i] === 1 ? "" : "s"}` }))),
-  ];
+  return {
+    head: head({ title: classes[b], meta: [swatch(speciesColor(b)), `${speciesName(b)} · ${fmt(members.length)} photos`], onclose: () => setBreed(-1) }),
+    body: [
+      statTiles([
+        [within + across ? pct(within / (within + across)) : "–", "of its links stay in the breed"],
+        [fmt(unlinked), "photos with no link"],
+      ]),
+      el("h3", { textContent: "Most often linked to" }),
+      top.length
+        ? el("div", { className: "rows" }, ...top.map(([k, c]) =>
+            el("button", { onclick: () => setBreed(k) }, el("span", { textContent: classes[k] }), el("span", { className: "count", textContent: `${fmt(c)} link${c === 1 ? "" : "s"}` }))))
+        : el("div", { className: "empty", textContent: "No links to other breeds at this threshold." }),
+      el("h3", { textContent: "Best-connected photos" }),
+      photoGrid(best.map((i) => ({ i, caption: `${deg[i]} link${deg[i] === 1 ? "" : "s"}` }))),
+    ],
+  };
 }
 
 function selectionView(i) {
   const nbs = neighborsOf(i);
   const k = labels[i];
-  return [
-    head(classes[k], [swatch(speciesColor(k)), `${speciesName(k)} · photo #${i}`], () => select(-1)),
-    el("img", { className: "hero", src: thumb(i), alt: `${classes[k]} photo` }),
-    el("p", {}, el("button", { className: "link-btn", textContent: `Highlight all ${classes[k]} photos`, onclick: () => setBreed(k) })),
-    el("h3", { textContent: nbs.length ? `${nbs.length} most similar` : "Most similar" }),
-    nbs.length
-      ? photoGrid(nbs.map(({ j, w: wj }) => ({ i: j, badge: wj.toFixed(3), caption: classes[labels[j]] })))
-      : el("div", { className: "empty", textContent: `No photo is above ${state.threshold.toFixed(3)} cosine with this one. Lower the slider, or rebuild with a lower --threshold.` }),
-  ];
+  return {
+    head: head({
+      title: classes[k],
+      meta: [swatch(speciesColor(k)), `${speciesName(k)} · photo #${i} · ${nbs.length} similar`],
+      onclose: () => select(-1),
+      thumbSrc: thumb(i),
+    }),
+    body: [
+      el("img", { className: "hero", src: thumb(i), alt: `${classes[k]} photo` }),
+      el("p", {}, el("button", { className: "link-btn", textContent: `Highlight all ${classes[k]} photos`, onclick: () => setBreed(k) })),
+      el("h3", { textContent: nbs.length ? `${nbs.length} most similar` : "Most similar" }),
+      nbs.length
+        ? photoGrid(nbs.map(({ j, w: wj }) => ({ i: j, badge: wj.toFixed(3), caption: classes[labels[j]] })))
+        : el("div", { className: "empty", textContent: `No photo is above ${state.threshold.toFixed(3)} cosine with this one. Lower the slider, or rebuild with a lower --threshold.` }),
+    ],
+  };
 }
