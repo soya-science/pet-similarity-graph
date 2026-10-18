@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+data/
+cache/
+web/thumbs/
+web/graph.json

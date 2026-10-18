@@ -1,0 +1,18 @@
+[project]
+name = "soya-graph"
+version = "0.1.0"
+description = "3D similarity graph of CLIP image embeddings"
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "open_clip_torch",
+    "pillow",
+    "torch",
+    "torchvision",
+    "tqdm",
+    "umap-learn",
+]
+
+[tool.uv]
+package = false
