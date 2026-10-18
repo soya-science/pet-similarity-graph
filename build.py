@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from soya_graph.embed import load_or_embed
-from soya_graph.export import write_graph
+from soya_graph.export import write_atlas, write_graph
 from soya_graph.graph import center, graph_summary, similarity_edges, similarity_report
 from soya_graph.layout import umap_3d
 
@@ -22,6 +22,8 @@ def main():
     p.add_argument("--pretrained", default="laion2b_s34b_b79k")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--force-embed", action="store_true", help="recompute embeddings even if cached")
+    p.add_argument("--umap-neighbors", type=int, default=30, help="UMAP n_neighbors (higher = more global structure)")
+    p.add_argument("--umap-min-dist", type=float, default=0.3, help="UMAP min_dist (higher = less clumped clusters)")
     p.add_argument("--out", type=Path, default=Path("web/graph.json"))
     args = p.parse_args()
 
@@ -42,14 +44,16 @@ def main():
     graph_summary(edges, weights, labels, len(emb))
 
     print("\nRunning UMAP to 3D...")
-    pos = umap_3d(emb, seed=args.seed)
+    pos = umap_3d(emb, n_neighbors=args.umap_neighbors, min_dist=args.umap_min_dist, seed=args.seed)
 
+    atlas = write_atlas(Path("web/thumbs"), len(emb), args.out.parent / "atlas.jpg")
     write_graph(
         args.out,
         pos=pos,
         edges=edges,
         weights=weights,
         meta=meta,
+        atlas=atlas,
         params={
             "model": f"{args.model} ({args.pretrained})",
             "threshold": args.threshold,

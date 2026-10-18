@@ -8,175 +8,326 @@
   <style>
     :root {
       color-scheme: light;
-      --page: #f9f9f7;
-      --surface: #fcfcfb;
+      --bg: #f9f9f7;
+      --card: rgba(252, 252, 251, 0.84);
+      --field: rgba(11, 11, 11, 0.04);
       --text-primary: #0b0b0b;
       --text-secondary: #52514e;
       --text-muted: #898781;
       --hairline: #e1e0d9;
       --border: rgba(11, 11, 11, 0.10);
+      --hover: rgba(11, 11, 11, 0.05);
+      --pill-on: rgba(11, 11, 11, 0.08);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 28px rgba(0, 0, 0, 0.08);
+      --vignette: rgba(0, 0, 0, 0);
       --cat: #2a78d6;
       --dog: #eb6834;
       --focus: #2a78d6;
-      --edge-mix: 0.22;
+      --edge-alpha: 0.30;
+      --edge-blend: normal;
     }
     @media (prefers-color-scheme: dark) {
       :root:not([data-theme="light"]) {
         color-scheme: dark;
-        --page: #0d0d0d;
-        --surface: #1a1a19;
+        --bg: #0d0d0d;
+        --card: rgba(26, 26, 25, 0.80);
+        --field: rgba(255, 255, 255, 0.05);
         --text-primary: #f0efec;
         --text-secondary: #c3c2b7;
         --text-muted: #898781;
         --hairline: #2c2c2a;
         --border: rgba(255, 255, 255, 0.10);
+        --hover: rgba(255, 255, 255, 0.06);
+        --pill-on: rgba(255, 255, 255, 0.12);
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 36px rgba(0, 0, 0, 0.5);
+        --vignette: rgba(0, 0, 0, 0.6);
         --cat: #3987e5;
         --dog: #d95926;
         --focus: #3987e5;
-        --edge-mix: 0.28;
+        --edge-alpha: 0.32;
+        --edge-blend: additive;
       }
     }
     :root[data-theme="dark"] {
       color-scheme: dark;
-      --page: #0d0d0d;
-      --surface: #1a1a19;
+      --bg: #0d0d0d;
+      --card: rgba(26, 26, 25, 0.80);
+      --field: rgba(255, 255, 255, 0.05);
       --text-primary: #f0efec;
       --text-secondary: #c3c2b7;
       --text-muted: #898781;
       --hairline: #2c2c2a;
       --border: rgba(255, 255, 255, 0.10);
+      --hover: rgba(255, 255, 255, 0.06);
+      --pill-on: rgba(255, 255, 255, 0.12);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 36px rgba(0, 0, 0, 0.5);
+      --vignette: rgba(0, 0, 0, 0.6);
       --cat: #3987e5;
       --dog: #d95926;
       --focus: #3987e5;
-      --edge-mix: 0.28;
+      --edge-alpha: 0.32;
+      --edge-blend: additive;
     }
 
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      background: var(--page);
+      background: var(--bg);
       color: var(--text-primary);
-      font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
-      display: flex;
-      flex-direction: column;
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
       overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font: inherit; color: inherit; }
+
+    #stage { position: fixed; inset: 0; }
+    #stage canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(ellipse at 50% 45%, transparent 50%, var(--vignette) 100%);
     }
 
-    header {
+    .card {
+      position: fixed;
+      background: var(--card);
+      -webkit-backdrop-filter: blur(16px) saturate(1.3);
+      backdrop-filter: blur(16px) saturate(1.3);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    /* ---------- toolbar ---------- */
+    #toolbar {
+      top: 16px;
+      left: 16px;
+      max-width: calc(100vw - 340px - 48px);
+      padding: 10px 12px 10px 16px;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 8px 20px;
-      padding: 10px 16px;
-      border-bottom: 1px solid var(--hairline);
+      gap: 10px 20px;
     }
-    header h1 { font-size: 15px; font-weight: 600; margin: 0; }
-    header label { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); }
-    header select, header input[type=range] { accent-color: var(--focus); }
-    header select {
+    .brand h1 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+    .brand div { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+
+    .search { position: relative; }
+    .search svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+    .search input {
       font: inherit;
+      font-size: 13px;
+      width: 190px;
+      padding: 6px 10px 6px 30px;
       color: var(--text-primary);
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 4px 6px;
-      max-width: 220px;
-    }
-    header output { color: var(--text-primary); font-variant-numeric: tabular-nums; min-width: 3.2em; }
-    #stats { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-
-    main { flex: 1; display: flex; min-height: 0; }
-    #stage { position: relative; flex: 1; min-width: 0; background: var(--surface); }
-    #stage canvas { display: block; width: 100%; height: 100%; outline: none; }
-
-    #legend {
-      position: absolute;
-      left: 16px;
-      bottom: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding: 8px 10px;
-      background: var(--surface);
+      background: var(--field);
       border: 1px solid var(--border);
       border-radius: 8px;
+      outline: none;
+    }
+    .search input:focus { border-color: var(--focus); }
+
+    .slider { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+    .slider input { width: 120px; accent-color: var(--focus); }
+    .slider output { color: var(--text-primary); font-variant-numeric: tabular-nums; min-width: 3.1em; font-weight: 600; }
+
+    .toggles { display: flex; gap: 4px; padding: 3px; background: var(--field); border-radius: 999px; border: 1px solid var(--border); }
+    .pill {
+      font-size: 12.5px;
+      padding: 3px 11px;
+      border: none;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .pill { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }
+    .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid currentColor; box-sizing: border-box; }
+    .pill:hover { color: var(--text-primary); }
+    .pill[aria-pressed="true"] { background: var(--pill-on); color: var(--text-primary); }
+    .pill[aria-pressed="true"]::before { background: var(--focus); border-color: var(--focus); }
+    .pill:disabled { opacity: 0.4; cursor: default; }
+    .icon-btn {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--field);
+      color: var(--text-secondary);
+      cursor: pointer;
+      flex: none;
+    }
+    .icon-btn:hover { color: var(--text-primary); background: var(--hover); }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+    /* ---------- panel ---------- */
+    #panel {
+      top: 16px;
+      right: 16px;
+      bottom: 16px;
+      width: 340px;
+      padding: 18px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+    }
+    #panel h2 { font-size: 18px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+    #panel h3 {
+      font-size: 11.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin: 20px 0 8px;
+    }
+    #panel p { margin: 8px 0 0; color: var(--text-secondary); font-size: 13px; }
+    .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .meta { color: var(--text-secondary); font-size: 13px; margin-top: 2px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+    .close { width: 28px; height: 28px; }
+
+    .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+    .tile { background: var(--field); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+    .tile .v { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+    .tile .k { font-size: 12px; color: var(--text-muted); }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12.5px;
+      padding: 4px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--text-primary);
+      cursor: pointer;
+    }
+    .chip:hover { background: var(--hover); }
+    .chip .count { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+    .hero { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 12px; display: block; margin: 14px 0 0; background: var(--field); }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 8px; }
+    .grid button { padding: 0; border: none; background: none; cursor: pointer; text-align: left; min-width: 0; }
+    .grid .ph { position: relative; }
+    .grid img {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 8px;
+      display: block;
+      background: var(--field);
+      transition: transform 0.15s ease;
+    }
+    .grid button:hover img { transform: scale(1.04); }
+    .badge {
+      position: absolute;
+      left: 5px;
+      bottom: 5px;
+      font-size: 11px;
+      font-weight: 650;
+      font-variant-numeric: tabular-nums;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.62);
+      border-radius: 6px;
+      padding: 1px 5px;
+    }
+    .cap { font-size: 11.5px; color: var(--text-secondary); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .rows { display: flex; flex-direction: column; }
+    .rows button {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 8px;
+      margin: 0 -8px;
+      border: none;
+      border-radius: 8px;
+      background: none;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .rows button:hover { background: var(--hover); }
+    .rows .count { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .link-btn { border: none; background: none; padding: 0; color: var(--focus); cursor: pointer; font-size: 13px; }
+    .foot { margin-top: 20px; font-size: 12px; color: var(--text-muted); }
+    .empty { color: var(--text-muted); font-size: 13px; }
+
+    /* ---------- legend, hint, tooltip, loading ---------- */
+    #legend {
+      left: 16px;
+      bottom: 16px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 13px;
       color: var(--text-secondary);
       pointer-events: none;
     }
     #legend div { display: flex; align-items: center; gap: 8px; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-
     #hint {
-      position: absolute;
-      right: 16px;
-      bottom: 16px;
-      color: var(--text-muted);
+      position: fixed;
+      left: 16px;
+      right: 372px;
+      bottom: 22px;
+      text-align: center;
       font-size: 12px;
+      color: var(--text-muted);
       pointer-events: none;
+      transition: opacity 0.6s ease;
     }
-
+    #hint.hidden { opacity: 0; }
     #tooltip {
-      position: absolute;
       display: none;
       pointer-events: none;
       padding: 6px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
-      width: 132px;
-    }
-    #tooltip img { display: block; width: 120px; height: 120px; border-radius: 4px; object-fit: cover; }
-    #tooltip .name { margin-top: 4px; font-weight: 600; }
-    #tooltip .sub { color: var(--text-secondary); font-size: 12px; }
-
-    aside {
-      width: 320px;
-      flex: none;
-      border-left: 1px solid var(--hairline);
-      overflow-y: auto;
-      padding: 16px;
-    }
-    aside h2 { font-size: 15px; margin: 0 0 4px; }
-    aside .sub { color: var(--text-secondary); }
-    aside .muted { color: var(--text-muted); }
-    aside dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 12px 0; }
-    aside dt { color: var(--text-secondary); }
-    aside dd { margin: 0; font-variant-numeric: tabular-nums; }
-    #selImg { width: 160px; height: 160px; border-radius: 8px; display: block; margin-bottom: 10px; object-fit: cover; }
-    .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-    button.link {
-      font: inherit;
-      color: var(--text-secondary);
-      background: none;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 2px 8px;
-      cursor: pointer;
-    }
-    #neighbors { list-style: none; margin: 8px 0 0; padding: 0; }
-    #neighbors li {
-      display: flex;
-      align-items: center;
       gap: 10px;
-      padding: 4px;
-      border-radius: 6px;
-      cursor: pointer;
+      align-items: center;
+      border-radius: 12px;
+      max-width: 260px;
     }
-    #neighbors li:hover, #neighbors li:focus-visible { background: var(--hairline); outline: none; }
-    #neighbors img { width: 48px; height: 48px; border-radius: 4px; object-fit: cover; flex: none; }
-    #neighbors .val { font-weight: 600; font-variant-numeric: tabular-nums; }
-    #neighbors .lbl { color: var(--text-secondary); font-size: 12px; }
-
-    #error { padding: 24px; color: var(--text-secondary); }
-    #error code { color: var(--text-primary); }
+    #tooltip img { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; flex: none; }
+    #tooltip .name { font-weight: 650; font-size: 13.5px; padding-right: 6px; }
+    #tooltip .sub { color: var(--text-secondary); font-size: 12px; padding-right: 6px; }
+    #loading {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-content: center;
+      justify-items: center;
+      gap: 14px;
+      color: var(--text-secondary);
+      background: var(--bg);
+      transition: opacity 0.5s ease;
+    }
+    #loading.done { opacity: 0; pointer-events: none; }
+    .spinner {
+      width: 28px;
+      height: 28px;
+      border: 2.5px solid var(--hairline);
+      border-top-color: var(--focus);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    #loading code { color: var(--text-primary); }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
     @media (max-width: 760px) {
-      main { flex-direction: column; }
-      #stage { flex: 1 1 55%; }
-      aside { width: auto; flex: 1 1 45%; border-left: none; border-top: 1px solid var(--hairline); }
+      #toolbar { left: 8px; right: 8px; top: 8px; max-width: none; padding: 10px 12px; gap: 8px 12px; }
+      .tools { gap: 8px 10px; }
+      .search input { width: 150px; }
+      .slider input { width: 90px; }
+      #panel { left: 8px; right: 8px; top: auto; bottom: 8px; width: auto; max-height: 40vh; padding: 14px; }
+      #legend { left: 8px; bottom: calc(40vh + 16px); }
       #hint { display: none; }
-      #stats { margin-left: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .grid img, #loading { transition: none; }
+      .spinner { animation-duration: 2s; }
     }
   </style>
   <script type="importmap">
@@ -189,27 +340,41 @@
   </script>
 </head>
 <body>
-  <header>
-    <h1>Pet Similarity Graph</h1>
-    <label>Highlight
-      <select id="breed"><option value="-1">None (color by species)</option></select>
-    </label>
-    <label>Min cosine
-      <input type="range" id="threshold" step="0.005">
-      <output id="thresholdOut"></output>
-    </label>
-    <label><input type="checkbox" id="showEdges" checked> Edges</label>
-    <label><input type="checkbox" id="rotate"> Auto-rotate</label>
-    <span id="stats"></span>
-  </header>
-  <main>
-    <div id="stage">
-      <div id="legend"></div>
-      <div id="tooltip"><img alt=""><div class="name"></div><div class="sub"></div></div>
-      <div id="hint">Drag to rotate · scroll to zoom · click an image</div>
+  <div id="stage"></div>
+  <div class="vignette"></div>
+
+  <header id="toolbar" class="card">
+    <div class="brand">
+      <h1>Pet Similarity Graph</h1>
+      <div id="subtitle"></div>
     </div>
-    <aside id="panel"></aside>
-  </main>
+    <div class="tools">
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5" stroke-linecap="round"/></svg>
+        <input id="breedSearch" type="search" list="breedList" placeholder="Find a breed…" aria-label="Highlight a breed" autocomplete="off">
+        <datalist id="breedList"></datalist>
+      </div>
+      <label class="slider">Similarity ≥
+        <input type="range" id="threshold" step="0.005" aria-label="Minimum cosine similarity">
+        <output id="thresholdOut"></output>
+      </label>
+      <div class="toggles" role="group" aria-label="Display options">
+        <button class="pill" id="tLinks" aria-pressed="true">Links</button>
+        <button class="pill" id="tPhotos" aria-pressed="true" title="Nodes turn into photos as you zoom in">Photos</button>
+        <button class="pill" id="tRotate" aria-pressed="true">Rotate</button>
+      </div>
+      <button class="icon-btn" id="resetView" title="Reset view" aria-label="Reset view">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2.5 2.5v3h3"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <aside id="panel" class="card" aria-live="polite"></aside>
+  <div id="legend" class="card"></div>
+  <div id="hint">Drag to orbit · Scroll to zoom · Zoom in to turn dots into photos · Click a photo</div>
+  <div id="tooltip" class="card"><img alt=""><div><div class="name"></div><div class="sub"></div></div></div>
+  <div id="loading"><div class="spinner"></div><div>Loading graph…</div></div>
+
   <script type="module" src="main.js"></script>
 </body>
 </html>

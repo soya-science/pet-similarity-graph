@@ -67,7 +67,7 @@ def load_or_embed(
     data_root=Path("data"),
     cache_dir=Path("cache"),
     thumb_dir=Path("web/thumbs"),
-    thumb_size=160,
+    thumb_size=256,
     batch_size=64,
     num_workers=4,
     force=False,

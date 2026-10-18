@@ -1,67 +1,98 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 
-// Colors are written straight from the CSS tokens (sRGB) into buffers, so skip three's linear conversion.
+// Colors go straight from the CSS tokens (sRGB) into buffers and shaders, so skip three's linear conversion.
 THREE.ColorManagement.enabled = false;
 
-const POINT_SIZE = 2.6;    // node diameter in world units (layout spans roughly -100..100)
-const FOCUS_SIZE = 3.4;
-const SELECTED_SIZE = 5.0;
-const MAX_PX_PER_UNIT = 6; // zoomed in, a node stops growing at aSize * this many CSS px
-const HOVER_RADIUS = 14;   // CSS px: pointer only has to be this close to the nearest node
-const FLY_MS = 650;
+// Node sizes are diameters in world units; the layout spans -100..100 along its longest axis.
+const POINT_SIZE = 1.6;
+const FOCUS_SIZE = 2.3;
+const SELECTED_SIZE = 3.6;
+const DOT_MAX_PX = 12;      // CSS px cap for a plain dot of POINT_SIZE
+const PHOTO_MAX_PX = 110;   // CSS px cap once dots have turned into photos
+const PHOTO_FROM_PX = 16;   // on-screen size where a dot starts turning into its photo...
+const PHOTO_FULL_PX = 30;   // ...and where it is fully a photo
+const ON_TOP = 1.001;       // aDim value that marks the selected node: full color, drawn in front of everything
+const HOVER_RADIUS = 12;    // CSS px: the pointer only has to be this close to a small node
+const FOV = 45;
+const VIEW_DIR = new THREE.Vector3(0.62, 0.38, 0.69).normalize();
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const FLY_MS = REDUCED_MOTION ? 0 : 1000;
 
 const $ = (id) => document.getElementById(id);
-const stage = $("stage");
-const panel = $("panel");
-const tooltip = $("tooltip");
-const breedSelect = $("breed");
-const thresholdInput = $("threshold");
+const ui = {
+  stage: $("stage"), panel: $("panel"), toolbar: $("toolbar"), tooltip: $("tooltip"), legend: $("legend"),
+  loading: $("loading"), subtitle: $("subtitle"), search: $("breedSearch"), breedList: $("breedList"),
+  threshold: $("threshold"), thresholdOut: $("thresholdOut"),
+  links: $("tLinks"), photos: $("tPhotos"), rotate: $("tRotate"), reset: $("resetView"),
+};
 
-const state = { breed: -1, threshold: 0, showEdges: true, selected: -1, hovered: -1 };
+const state = { breed: -1, threshold: 0, links: true, photos: true, rotate: !REDUCED_MOTION, selected: -1, hovered: -1 };
 
-let n, pos, labels, species, classes, classSpecies, params;
+let n, E, pos, labels, species, classes, classSpecies, params, atlas, allNodes, breedMembers;
 let src, dst, w, sameBreedPrefix, adjacency;
-let theme, renderer, scene, camera, controls;
-let points, lines, highlight, baseSizes;
-let fly = null;
+let theme, renderer, scene, camera, controls, nodes, edges, highlight, halo;
+let baseSizes, scaleCss = 1, atlasReady = false, fly = null, home = null;
+const fog = { uFogNear: { value: 0 }, uFogFar: { value: 1 } };
+let sceneRadius = 100;
 
 const thumb = (i) => `thumbs/${i}.jpg`;
-const mix = (a, b, t) => a.clone().lerp(b, t);
 const fmt = (x) => x.toLocaleString();
+const pct = (x) => `${(x * 100).toFixed(0)}%`;
+const speciesName = (k) => (classSpecies[k] === "cat" ? "Cat" : "Dog");
 
 main();
 
 async function main() {
   let data;
   try {
-    const res = await fetch("graph.json");
+    const res = await fetch("graph.json", { cache: "no-cache" });
     if (!res.ok) throw new Error(res.statusText);
     data = await res.json();
   } catch {
-    panel.innerHTML = `<div id="error">No <code>graph.json</code> found. Run <code>uv run python build.py</code> first, then serve this folder with <code>uv run python -m http.server -d web 8000</code>.</div>`;
+    ui.loading.replaceChildren(el("div", {},
+      "No ", el("code", { textContent: "graph.json" }), " yet. Run ",
+      el("code", { textContent: "uv run python build.py" }), " and reload."));
     return;
   }
   loadData(data);
   theme = readTheme();
   initScene();
-  initControls();
-  recolor();
+  initUI();
+  applyTheme();
+  loadAtlas();
   renderPanel();
+  resize();
+
+  home = homeView();
+  controls.target.copy(home.target);
+  camera.position.copy(home.target).addScaledVector(home.dir, home.distance * (REDUCED_MOTION ? 1 : 1.8));
+  flyTo(home.target, home.distance, home.dir);
   requestAnimationFrame(animate);
+  requestAnimationFrame(() => ui.loading.classList.add("done"));
 }
+
+// ---------- data ----------
 
 function loadData(data) {
   params = data.params;
   classes = data.classes;
   classSpecies = data.classSpecies;
+  atlas = data.atlas;
   labels = Int32Array.from(data.nodes.label);
   n = labels.length;
   pos = Float32Array.from(data.nodes.pos);
   species = labels.map((l) => (classSpecies[l] === "cat" ? 0 : 1));
+  allNodes = Array.from({ length: n }, (_, i) => i);
+  breedMembers = classes.map(() => []);
+  labels.forEach((l, i) => breedMembers[l].push(i));
+  for (let i = 0; i < n; i++) sceneRadius = Math.max(sceneRadius, Math.hypot(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]));
 
-  // Sort edges strongest first, so "edges >= t" is always a prefix and the slider is just a draw range.
-  const E = data.edges.w.length;
+  // Strongest edges first, so "edges >= t" is always a prefix and the slider is just a draw range.
+  E = data.edges.w.length;
   const order = Array.from({ length: E }, (_, k) => k).sort((a, b) => data.edges.w[b] - data.edges.w[a]);
   src = new Int32Array(E);
   dst = new Int32Array(E);
@@ -78,26 +109,9 @@ function loadData(data) {
   state.threshold = params.threshold;
 }
 
-function readTheme() {
-  const cs = getComputedStyle(document.documentElement);
-  const c = (name) => new THREE.Color(cs.getPropertyValue(name).trim());
-  const t = {
-    surface: c("--surface"),
-    primary: c("--text-primary"),
-    muted: c("--text-muted"),
-    cat: c("--cat"),
-    dog: c("--dog"),
-    focus: c("--focus"),
-    edgeMix: parseFloat(cs.getPropertyValue("--edge-mix")),
-  };
-  t.mutedPoint = mix(t.surface, t.muted, 0.55);
-  t.dimEdge = mix(t.surface, t.muted, t.edgeMix * 0.5);
-  return t;
-}
-
 // Number of edges with weight >= t (edges are sorted descending).
-function visibleCount(t) {
-  let lo = 0, hi = w.length;
+function visibleCount(t = state.threshold) {
+  let lo = 0, hi = E;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
     if (w[mid] >= t) lo = mid + 1; else hi = mid;
@@ -114,71 +128,174 @@ function neighborsOf(i) {
   return out;
 }
 
+function degreesAt() {
+  const deg = new Int32Array(n);
+  const count = visibleCount();
+  for (let r = 0; r < count; r++) { deg[src[r]]++; deg[dst[r]]++; }
+  return deg;
+}
+
+// ---------- theme ----------
+
+function readTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const c = (name) => new THREE.Color(cs.getPropertyValue(name).trim());
+  const t = {
+    bg: c("--bg"),
+    primary: c("--text-primary"),
+    muted: c("--text-muted"),
+    cat: c("--cat"),
+    dog: c("--dog"),
+    focus: c("--focus"),
+    edgeAlpha: parseFloat(cs.getPropertyValue("--edge-alpha")),
+    additive: cs.getPropertyValue("--edge-blend").trim() === "additive",
+  };
+  t.other = t.bg.clone().lerp(t.muted, 0.55); // how non-highlighted nodes end up drawn
+  return t;
+}
+
+function applyTheme() {
+  theme = readTheme();
+  renderer.setClearColor(theme.bg);
+  nodes.material.uniforms.uBg.value.copy(theme.bg);
+  edges.material.blending = theme.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+  edges.material.needsUpdate = true;
+  halo.material.uniforms.uColor.value.copy(theme.primary);
+  recolor();
+  renderLegend();
+}
+
 // ---------- scene ----------
 
 function initScene() {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setClearColor(theme.surface);
-  stage.prepend(renderer.domElement);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  ui.stage.append(renderer.domElement);
   renderer.domElement.tabIndex = 0;
   renderer.domElement.setAttribute("aria-label", "3D similarity graph of pet photos");
 
   scene = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(50, 1, 0.1, 5000);
-  camera.position.set(0, 0, 260);
-
+  camera = new THREE.PerspectiveCamera(FOV, 1, 0.5, 5000);
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.autoRotateSpeed = 0.6;
-  controls.addEventListener("start", () => { fly = null; });
+  controls.rotateSpeed = 0.7;
+  controls.minDistance = 6;
+  controls.maxDistance = 1500;
+  controls.autoRotateSpeed = 0.45;
+  controls.autoRotate = state.rotate;
+  controls.addEventListener("start", () => { fly = null; setRotate(false); hideHint(); });
 
-  // Nodes: one Points object, round sprites with a thin surface-colored ring so overlapping dots stay separable.
-  const pg = new THREE.BufferGeometry();
-  pg.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  pg.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-  pg.setAttribute("aSize", new THREE.BufferAttribute(new Float32Array(n), 1));
+  // Nodes: one Points object. Each sprite is a shaded dot that turns into its photo once it is big enough on screen.
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setAttribute("aSize", new THREE.BufferAttribute(new Float32Array(n), 1));
+  g.setAttribute("aDim", new THREE.BufferAttribute(new Float32Array(n), 1));
+  g.setAttribute("aTile", new THREE.BufferAttribute(new Float32Array(n * 2), 2));
   baseSizes = new Float32Array(n);
-  points = new THREE.Points(pg, new THREE.ShaderMaterial({
+  nodes = new THREE.Points(g, new THREE.ShaderMaterial({
     uniforms: {
+      ...fog,
       uScale: { value: 1 },
-      uDpr: { value: renderer.getPixelRatio() },
-      uRing: { value: theme.surface.clone() },
+      uDpr: { value: 1 },
+      uBaseSize: { value: POINT_SIZE },
+      uDotMaxPx: { value: DOT_MAX_PX },
+      uPhotoMaxPx: { value: PHOTO_MAX_PX },
+      uPhotoFrom: { value: PHOTO_FROM_PX },
+      uPhotoFull: { value: PHOTO_FULL_PX },
+      uPhotosOn: { value: 0 },
+      uBg: { value: new THREE.Color() },
+      uAtlas: { value: null },
+      uGrid: { value: new THREE.Vector2(1, 1) },
+      uTile: { value: 64 },
     },
-    vertexShader: `
+    vertexShader: /* glsl */ `
       attribute vec3 aColor;
       attribute float aSize;
+      attribute float aDim;
+      attribute vec2 aTile;
       uniform float uScale;
       uniform float uDpr;
+      uniform float uBaseSize;
+      uniform float uDotMaxPx;
+      uniform float uPhotoMaxPx;
+      uniform float uPhotoFrom;
+      uniform float uPhotoFull;
+      uniform float uPhotosOn;
+      uniform float uFogNear;
+      uniform float uFogFar;
       varying vec3 vColor;
       varying float vPx;
+      varying float vDim;
+      varying float vFog;
+      varying float vPhoto;
+      varying vec2 vTile;
       void main() {
-        vColor = aColor;
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = clamp(aSize * uScale / -mv.z, 4.0 * uDpr, aSize * ${MAX_PX_PER_UNIT.toFixed(1)} * uDpr);
-        vPx = gl_PointSize;
+        float depth = -mv.z;
+        // Only fully visible nodes turn into photos; faded ones stay small dots so the highlighted photos stand out.
+        float photoOk = uPhotosOn * step(0.75, aDim);
+        float maxPx = mix(uDotMaxPx, uPhotoMaxPx, photoOk) * uDpr * aSize / uBaseSize;
+        float px = clamp(aSize * uScale / depth, 4.0 * uDpr, maxPx);
+        gl_PointSize = px;
         gl_Position = projectionMatrix * mv;
+        // Faded nodes go to the back of the depth range so they never cover a highlighted photo;
+        // the selected node (aDim > 1) goes to the front so nothing covers it.
+        if (aDim < 0.75) gl_Position.z = 0.9999 * gl_Position.w;
+        else if (aDim > 1.0) gl_Position.z = -0.9999 * gl_Position.w;
+        vPx = px;
+        vColor = aColor;
+        vDim = aDim;
+        vTile = aTile;
+        vFog = 0.85 * smoothstep(uFogNear, uFogFar, depth);
+        vPhoto = photoOk * smoothstep(uPhotoFrom * uDpr, uPhotoFull * uDpr, px);
       }`,
-    fragmentShader: `
-      uniform vec3 uRing;
+    fragmentShader: /* glsl */ `
+      uniform sampler2D uAtlas;
+      uniform vec2 uGrid;
+      uniform float uTile;
+      uniform vec3 uBg;
       uniform float uDpr;
       varying vec3 vColor;
       varying float vPx;
+      varying float vDim;
+      varying float vFog;
+      varying float vPhoto;
+      varying vec2 vTile;
+      float sdRoundBox(vec2 p, float r) {
+        vec2 q = abs(p) - (1.0 - r);
+        return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+      }
       void main() {
-        float R = vPx * 0.5;
-        float r = length(gl_PointCoord * 2.0 - 1.0) * R;
-        if (r > R) discard;
-        float t = smoothstep(R - uDpr - 0.75, R - uDpr + 0.75, r);
-        gl_FragColor = vec4(mix(vColor, uRing, t), 1.0);
-      }`,
-  }));
-  points.renderOrder = 2;
-  scene.add(points);
+        vec2 p = gl_PointCoord * 2.0 - 1.0;
+        float unit = 2.0 / vPx;  // one device pixel in sprite units
+        float d = mix(length(p) - 1.0, sdRoundBox(p, 0.16), vPhoto);
+        float alpha = 1.0 - smoothstep(-unit, 0.0, d);
+        if (alpha <= 0.0) discard;
 
-  // Edges: one LineSegments in strongest-first order; the threshold slider only changes the draw range.
-  const E = w.length;
+        vec3 shade = vColor * (1.12 - 0.32 * dot(p, p));
+        vec2 c = clamp(gl_PointCoord, 0.5 / uTile, 1.0 - 0.5 / uTile);
+        vec3 photo = texture2D(uAtlas, vec2((vTile.x + c.x) / uGrid.x, 1.0 - (vTile.y + c.y) / uGrid.y)).rgb;
+        vec3 inner = mix(shade, photo, vPhoto);
+        // Dots get a 1px background ring so overlapping dots stay separable; photos get a 2.5px identity-colored frame.
+        vec3 rim = mix(uBg, vColor, vPhoto);
+        float rimWidth = mix(1.0, 2.5, vPhoto) * uDpr * unit;
+        vec3 col = mix(inner, rim, smoothstep(-rimWidth - unit, -rimWidth, d));
+        col = mix(uBg, col, min(vDim, 1.0));
+        col = mix(col, uBg, vFog);
+        gl_FragColor = vec4(col, alpha);
+      }`,
+    alphaToCoverage: true,
+  }));
+  const tiles = g.attributes.aTile.array;
+  const cols = atlas?.cols ?? 1;
+  for (let i = 0; i < n; i++) { tiles[i * 2] = i % cols; tiles[i * 2 + 1] = Math.floor(i / cols); }
+  nodes.renderOrder = 2;
+  scene.add(nodes);
+
+  // Edges: one LineSegments, strongest first; the threshold slider only changes the draw range.
   const lp = new Float32Array(E * 6);
   for (let r = 0; r < E; r++) {
     lp.set(pos.subarray(src[r] * 3, src[r] * 3 + 3), r * 6);
@@ -186,334 +303,607 @@ function initScene() {
   }
   const lg = new THREE.BufferGeometry();
   lg.setAttribute("position", new THREE.BufferAttribute(lp, 3));
-  lg.setAttribute("color", new THREE.BufferAttribute(new Float32Array(E * 6), 3));
-  lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors: true, depthWrite: false }));
-  lines.renderOrder = 0;
-  scene.add(lines);
+  lg.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(E * 8), 4));
+  edges = new THREE.LineSegments(lg, new THREE.ShaderMaterial({
+    uniforms: { ...fog },
+    vertexShader: /* glsl */ `
+      attribute vec4 aColor;
+      uniform float uFogNear;
+      uniform float uFogFar;
+      varying vec4 vColor;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vColor = vec4(aColor.rgb, aColor.a * (1.0 - 0.85 * smoothstep(uFogNear, uFogFar, -mv.z)));
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */ `
+      varying vec4 vColor;
+      void main() { gl_FragColor = vColor; }`,
+    transparent: true,
+    depthWrite: false,
+  }));
+  edges.renderOrder = 0;
+  scene.add(edges);
 
-  // Edges of the selected node, drawn in primary ink above the rest.
-  highlight = new THREE.LineSegments(
-    new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({ color: theme.primary, depthWrite: false }),
-  );
+  // Links of the selected (or hovered) node, as 2px lines. Opaque and drawn before the nodes without writing depth,
+  // so every node (including the selected photo) paints over its own links.
+  highlight = new LineSegments2(new LineSegmentsGeometry(), new LineMaterial({ linewidth: 2, depthWrite: false }));
   highlight.renderOrder = 1;
+  highlight.visible = false;
   scene.add(highlight);
 
-  new ResizeObserver(resize).observe(stage);
-  resize();
+  // Pulsing ring around the selected node, drawn on top of everything.
+  const hg = new THREE.BufferGeometry();
+  hg.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0], 3));
+  halo = new THREE.Points(hg, new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color() }, uPx: { value: 30 }, uDpr: { value: 1 } },
+    vertexShader: /* glsl */ `
+      uniform float uPx;
+      void main() {
+        gl_PointSize = uPx;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uPx;
+      uniform float uDpr;
+      void main() {
+        float r = length(gl_PointCoord * 2.0 - 1.0) * uPx * 0.5;  // device px from center
+        float R = uPx * 0.5 - uDpr;
+        float a = 1.0 - smoothstep(0.75 * uDpr, 1.75 * uDpr, abs(r - R));
+        if (a <= 0.0) discard;
+        gl_FragColor = vec4(uColor, a * 0.9);
+      }`,
+    transparent: true,
+    depthTest: false,
+  }));
+  halo.renderOrder = 10;
+  halo.visible = false;
+  halo.frustumCulled = false;
+  scene.add(halo);
 
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-    theme = readTheme();
-    renderer.setClearColor(theme.surface);
-    points.material.uniforms.uRing.value.copy(theme.surface);
-    highlight.material.color.copy(theme.primary);
-    recolor();
-    renderLegend();
-  });
+  new ResizeObserver(resize).observe(ui.stage);
+  new ResizeObserver(updateViewOffset).observe(ui.panel);
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+}
+
+function loadAtlas() {
+  const max = renderer.capabilities.maxTextureSize;
+  if (!atlas || atlas.cols * atlas.tile > max || atlas.rows * atlas.tile > max) {
+    ui.photos.disabled = true;
+    setPhotos(false);
+    return;
+  }
+  new THREE.TextureLoader().load(atlas.url, (tex) => {
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    const u = nodes.material.uniforms;
+    u.uAtlas.value = tex;
+    u.uGrid.value.set(atlas.cols, atlas.rows);
+    u.uTile.value = atlas.tile;
+    atlasReady = true;
+    setPhotos(state.photos);
+  }, undefined, () => { ui.photos.disabled = true; });
 }
 
 function resize() {
-  const { clientWidth: wpx, clientHeight: hpx } = stage;
-  renderer.setSize(wpx, hpx, false);
-  camera.aspect = wpx / hpx;
-  camera.updateProjectionMatrix();
+  const W = ui.stage.clientWidth, H = ui.stage.clientHeight;
   const dpr = renderer.getPixelRatio();
-  points.material.uniforms.uScale.value = (dpr * hpx) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
-  points.material.uniforms.uDpr.value = dpr;
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H;
+  scaleCss = H / (2 * Math.tan(THREE.MathUtils.degToRad(FOV / 2)));
+  nodes.material.uniforms.uScale.value = dpr * scaleCss;
+  nodes.material.uniforms.uDpr.value = dpr;
+  halo.material.uniforms.uDpr.value = dpr;
+  highlight.material.resolution.set(W, H);
+  updateViewOffset();
 }
 
+// The unobstructed part of the canvas: right of nothing, below the toolbar, left of (or above) the panel.
+function freeArea() {
+  const W = ui.stage.clientWidth, H = ui.stage.clientHeight;
+  const p = ui.panel.getBoundingClientRect(), t = ui.toolbar.getBoundingClientRect();
+  const panelOnRight = p.top < H / 2;
+  const pad = 24;
+  const left = pad, right = (panelOnRight ? p.left : W) - pad;
+  const top = t.bottom + pad, bottom = (panelOnRight ? H : p.top) - pad - 16; // 16: room for the hint line
+  return { W, H, fw: right - left, fh: bottom - top, cx: (left + right) / 2, cy: (top + bottom) / 2 };
+}
+
+// Shift the projection so the camera's axis lands in the middle of the free area instead of under the panel.
+function updateViewOffset() {
+  if (!camera) return;
+  const { W, H, cx, cy } = freeArea();
+  camera.setViewOffset(W, H, W / 2 - cx, H / 2 - cy, W, H);
+}
+
+// Distance at which the given nodes fit the free area when viewed from `dir` toward `center`.
+function fitDistance(indices, center, dir, quantile = 0.98) {
+  const { H, fw, fh } = freeArea();
+  const tanV = Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+  const tx = (tanV * fw) / H, ty = (tanV * fh) / H;
+  const forward = dir.clone().negate();
+  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, forward);
+  const need = indices.map((i) => {
+    const x = pos[i * 3] - center.x, y = pos[i * 3 + 1] - center.y, z = pos[i * 3 + 2] - center.z;
+    const u = Math.abs(x * right.x + y * right.y + z * right.z);
+    const v = Math.abs(x * up.x + y * up.y + z * up.z);
+    return x * dir.x + y * dir.y + z * dir.z + Math.max(u / tx, v / ty);
+  }).sort((a, b) => a - b);
+  return Math.max(15, need[Math.min(need.length - 1, Math.floor(quantile * need.length))] * 1.04);
+}
+
+function centroid(indices) {
+  const c = new THREE.Vector3();
+  for (const i of indices) c.x += pos[i * 3], c.y += pos[i * 3 + 1], c.z += pos[i * 3 + 2];
+  return c.divideScalar(Math.max(1, indices.length));
+}
+
+function homeView() {
+  const target = new THREE.Vector3();
+  return { target, dir: VIEW_DIR.clone(), distance: fitDistance(allNodes, target, VIEW_DIR, 0.995) };
+}
+
+function currentDir() {
+  return camera.position.clone().sub(controls.target).normalize();
+}
+
+// On-screen diameter in CSS px of a node of `size` and `dim` at `depth`, matching the vertex shader.
+function displayPx(size, depth, dim = 1) {
+  const cap = (photosActive() && dim >= 0.75 ? PHOTO_MAX_PX : DOT_MAX_PX) * size / POINT_SIZE;
+  return Math.min(Math.max(size * scaleCss / depth, 4), cap);
+}
+
+const photosActive = () => state.photos && atlasReady;
+
 function nodeColor(i) {
-  if (state.breed >= 0) return labels[i] === state.breed ? theme.focus : theme.mutedPoint;
+  if (state.breed >= 0) return labels[i] === state.breed ? theme.focus : theme.muted;
   return species[i] ? theme.dog : theme.cat;
 }
 
-// Recompute every node color/size and edge color from the current state.
+// Recompute node colors/sizes/dimming and edge colors from the current state.
 function recolor() {
-  const colors = points.geometry.attributes.aColor.array;
-  const sel = state.selected;
-  const near = new Set();
-  if (sel >= 0) {
-    near.add(sel);
-    for (const { j } of neighborsOf(sel)) near.add(j);
-  }
-
-  const edgeColor = new Array(n);
+  const A = nodes.geometry.attributes;
+  const sel = state.selected, focus = state.breed;
+  const near = sel >= 0 ? new Set([sel, ...neighborsOf(sel).map((nb) => nb.j)]) : null;
   for (let i = 0; i < n; i++) {
-    let c = nodeColor(i);
-    let size = state.breed >= 0 ? (labels[i] === state.breed ? FOCUS_SIZE : POINT_SIZE * 0.8) : POINT_SIZE;
-    if (sel >= 0) {
-      if (i === sel) size = SELECTED_SIZE;
-      else if (near.has(i)) size = FOCUS_SIZE;
-      else { c = mix(theme.surface, c, 0.3); size *= 0.85; }
+    const inFocus = focus < 0 || labels[i] === focus;
+    let size = focus < 0 ? POINT_SIZE : inFocus ? FOCUS_SIZE : POINT_SIZE * 0.85;
+    let dim = inFocus ? 1 : 0.55;
+    if (near) {
+      if (i === sel) { size = SELECTED_SIZE; dim = ON_TOP; }
+      else if (near.has(i)) { size = Math.max(size, FOCUS_SIZE); dim = 1; }
+      else { dim = Math.min(dim, 0.3); size *= 0.9; }
     }
-    c.toArray(colors, i * 3);
+    nodeColor(i).toArray(A.aColor.array, i * 3);
+    A.aDim.array[i] = dim;
     baseSizes[i] = size;
-
-    if (sel >= 0) edgeColor[i] = theme.dimEdge;
-    else if (state.breed >= 0) edgeColor[i] = labels[i] === state.breed ? mix(theme.surface, theme.focus, 0.6) : theme.dimEdge;
-    else edgeColor[i] = mix(theme.surface, c, theme.edgeMix);
   }
-  points.geometry.attributes.aColor.needsUpdate = true;
+  A.aColor.needsUpdate = true;
+  A.aDim.needsUpdate = true;
   applySizes();
 
-  const lc = lines.geometry.attributes.color.array;
-  for (let r = 0; r < w.length; r++) {
-    edgeColor[src[r]].toArray(lc, r * 6);
-    edgeColor[dst[r]].toArray(lc, r * 6 + 3);
+  const col = edges.geometry.attributes.aColor.array;
+  const wmin = params.threshold, span = Math.max(1e-6, (w[0] ?? 1) - wmin);
+  const setEnd = (o, node, strength) => {
+    let c = species[node] ? theme.dog : theme.cat;
+    let a = theme.edgeAlpha * strength;
+    if (focus >= 0) {
+      if (labels[node] === focus) { c = theme.focus; a = Math.min(1, a * 2); }
+      else { c = theme.muted; a *= 0.3; }
+    }
+    if (near) a *= 0.3;
+    col[o] = c.r; col[o + 1] = c.g; col[o + 2] = c.b; col[o + 3] = a;
+  };
+  for (let r = 0; r < E; r++) {
+    const strength = 0.25 + 0.75 * (w[r] - wmin) / span; // stronger similarity, brighter link
+    setEnd(r * 8, src[r], strength);
+    setEnd(r * 8 + 4, dst[r], strength);
   }
-  lines.geometry.attributes.color.needsUpdate = true;
-  lines.geometry.setDrawRange(0, visibleCount(state.threshold) * 2);
-  lines.visible = state.showEdges;
-
-  const hp = [];
-  if (sel >= 0) {
-    for (const { j } of neighborsOf(sel)) hp.push(...pos.subarray(sel * 3, sel * 3 + 3), ...pos.subarray(j * 3, j * 3 + 3));
-  }
-  highlight.geometry.dispose();
-  highlight.geometry = new THREE.BufferGeometry();
-  highlight.geometry.setAttribute("position", new THREE.Float32BufferAttribute(hp, 3));
-  highlight.visible = state.showEdges;
+  edges.geometry.attributes.aColor.needsUpdate = true;
+  edges.geometry.setDrawRange(0, visibleCount() * 2);
+  edges.visible = state.links;
+  updateHighlight();
 }
 
 function applySizes() {
-  const sizes = points.geometry.attributes.aSize.array;
+  const sizes = nodes.geometry.attributes.aSize.array;
   sizes.set(baseSizes);
-  if (state.hovered >= 0) sizes[state.hovered] = Math.max(baseSizes[state.hovered] * 1.5, FOCUS_SIZE);
-  points.geometry.attributes.aSize.needsUpdate = true;
+  if (state.hovered >= 0) sizes[state.hovered] = baseSizes[state.hovered] * 1.35;
+  nodes.geometry.attributes.aSize.needsUpdate = true;
 }
 
+function updateHighlight() {
+  const i = state.selected >= 0 ? state.selected : state.hovered;
+  const nbs = i >= 0 && state.links ? neighborsOf(i) : [];
+  highlight.visible = nbs.length > 0;
+  if (!nbs.length) return;
+  const arr = new Float32Array(nbs.length * 6);
+  nbs.forEach(({ j }, k) => {
+    arr.set(pos.subarray(i * 3, i * 3 + 3), k * 6);
+    arr.set(pos.subarray(j * 3, j * 3 + 3), k * 6 + 3);
+  });
+  highlight.geometry.dispose();
+  highlight.geometry = new LineSegmentsGeometry().setPositions(arr);
+  highlight.material.color.copy(theme.bg).lerp(theme.primary, state.selected >= 0 ? 0.8 : 0.45);
+}
+
+// ---------- animation ----------
+
 function animate(now) {
-  if (fly) {
-    const k = Math.min(1, (now - fly.t0) / FLY_MS);
-    const e = 1 - Math.pow(1 - k, 3);
-    controls.target.lerpVectors(fly.from, fly.to, e);
-    camera.position.lerpVectors(fly.camFrom, fly.camTo, e);
-    if (k === 1) fly = null;
-  }
+  if (fly) stepFly(now);
   controls.update();
+  camera.updateMatrixWorld();
+  const dist = camera.position.distanceTo(controls.target);
+  fog.uFogNear.value = Math.max(0, dist - sceneRadius * 0.25);
+  fog.uFogFar.value = dist + sceneRadius * 1.3;
+  updateHalo(now);
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
 
-function flyTo(i) {
-  const to = new THREE.Vector3().fromArray(pos, i * 3);
-  const offset = camera.position.clone().sub(controls.target);
-  offset.setLength(Math.min(offset.length(), 90));
+function updateHalo(now) {
+  const i = state.selected;
+  halo.visible = i >= 0;
+  if (i < 0) return;
+  halo.position.fromArray(pos, i * 3);
+  const depth = -halo.position.clone().applyMatrix4(camera.matrixWorldInverse).z;
+  const pulse = REDUCED_MOTION ? 0 : 3 * Math.sin(now / 320);
+  halo.material.uniforms.uPx.value = (displayPx(SELECTED_SIZE, depth) + 14 + pulse) * renderer.getPixelRatio();
+}
+
+function flyTo(target, distance, dir = currentDir()) {
+  const fromDir = currentDir();
   fly = {
     t0: performance.now(),
-    from: controls.target.clone(),
-    to,
-    camFrom: camera.position.clone(),
-    camTo: to.clone().add(offset),
+    fromTarget: controls.target.clone(),
+    toTarget: target.clone(),
+    fromDist: camera.position.distanceTo(controls.target),
+    toDist: distance,
+    fromDir,
+    rot: new THREE.Quaternion().setFromUnitVectors(fromDir, dir.clone().normalize()),
   };
+  if (!FLY_MS) stepFly(fly.t0 + 1);
+}
+
+function stepFly(now) {
+  const k = FLY_MS ? Math.min(1, Math.max(0, (now - fly.t0) / FLY_MS)) : 1;
+  const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+  controls.target.lerpVectors(fly.fromTarget, fly.toTarget, e);
+  const q = new THREE.Quaternion().slerp(fly.rot, e);
+  const dist = fly.fromDist * Math.pow(fly.toDist / fly.fromDist, e);
+  camera.position.copy(controls.target).addScaledVector(fly.fromDir.clone().applyQuaternion(q), dist);
+  if (k === 1) fly = null;
+}
+
+function flyHome() {
+  home = homeView();
+  flyTo(home.target, home.distance, home.dir);
+}
+
+// Distance at which a node of `size` shows at about `px` CSS px wide.
+const distanceForPx = (size, px) => (size * scaleCss) / px;
+
+function flyToNode(i) {
+  flyTo(new THREE.Vector3().fromArray(pos, i * 3), distanceForPx(SELECTED_SIZE, 80));
+}
+
+function flyToBreed(k) {
+  const members = breedMembers[k];
+  const target = centroid(members);
+  // Extra margin, since up close nodes are photos that extend well past their centers; and never so close
+  // that the breed's photos get bigger than ~44px and pile on top of each other.
+  flyTo(target, Math.max(fitDistance(members, target, currentDir(), 0.9) * 1.6, distanceForPx(FOCUS_SIZE, 44)));
 }
 
 // ---------- picking ----------
 
 const projMatrix = new THREE.Matrix4();
 
-// Nearest node to the pointer in screen space, within HOVER_RADIUS; ties go to the node nearer the camera.
+// The node under the pointer: of the nodes whose drawn sprite covers it, the one nearest the camera;
+// failing that, the closest node within HOVER_RADIUS.
 function pick(px, py) {
-  const rect = renderer.domElement.getBoundingClientRect();
+  const W = ui.stage.clientWidth, H = ui.stage.clientHeight;
   camera.updateMatrixWorld();
   const m = projMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).elements;
-  const maxD = HOVER_RADIUS * HOVER_RADIUS;
-  let best = -1, bestD = Infinity, bestW = Infinity;
+  const sizes = nodes.geometry.attributes.aSize.array;
+  const dims = nodes.geometry.attributes.aDim.array;
+  let cover = -1, coverDepth = Infinity, near = -1, nearD = HOVER_RADIUS * HOVER_RADIUS;
   for (let i = 0; i < n; i++) {
     const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
     const cw = m[3] * x + m[7] * y + m[11] * z + m[15];
     if (cw <= 0) continue;
-    const sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw * 0.5 + 0.5) * rect.width;
-    const sy = (0.5 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw * 0.5) * rect.height;
+    const sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) / cw * 0.5 + 0.5) * W;
+    const sy = (0.5 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / cw * 0.5) * H;
     const d = (sx - px) ** 2 + (sy - py) ** 2;
-    if (d > maxD) continue;
-    if (d < bestD - 4 || (d <= bestD + 4 && cw < bestW)) { best = i; bestD = d; bestW = cw; }
+    const r = displayPx(sizes[i], cw, dims[i]) / 2;
+    if (d <= r * r) {
+      const drawnDepth = dims[i] < 0.75 ? cw + 1e6 : dims[i] > 1 ? -1 : cw; // matches the depth layering in the shader
+      if (drawnDepth < coverDepth) { cover = i; coverDepth = drawnDepth; }
+    } else if (d < nearD) {
+      near = i; nearD = d;
+    }
   }
-  return best;
+  return cover >= 0 ? cover : near;
 }
 
 function setHovered(i, ev) {
   if (i !== state.hovered) {
     state.hovered = i;
     applySizes();
+    if (state.selected < 0) updateHighlight();
   }
   renderer.domElement.style.cursor = i >= 0 ? "pointer" : "";
-  if (i < 0) { tooltip.style.display = "none"; return; }
+  const tip = ui.tooltip;
+  if (i < 0) { tip.style.display = "none"; return; }
 
-  tooltip.querySelector("img").src = thumb(i);
-  tooltip.querySelector(".name").textContent = classes[labels[i]];
-  const sub = tooltip.querySelector(".sub");
+  tip.querySelector("img").src = thumb(i);
+  tip.querySelector(".name").textContent = classes[labels[i]];
   const link = state.selected >= 0 && i !== state.selected && neighborsOf(state.selected).find((nb) => nb.j === i);
-  sub.textContent = link
+  const links = neighborsOf(i).length;
+  tip.querySelector(".sub").textContent = link
     ? `cosine ${link.w.toFixed(3)} to selected`
-    : `${classSpecies[labels[i]]} · ${neighborsOf(i).length} links`;
+    : `${speciesName(labels[i])} · ${links} link${links === 1 ? "" : "s"}`;
 
-  tooltip.style.display = "block";
-  const rect = stage.getBoundingClientRect();
-  const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
-  const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
-  tooltip.style.left = `${x + 16 + tw > rect.width ? x - tw - 16 : x + 16}px`;
-  tooltip.style.top = `${Math.min(Math.max(8, y - th / 2), rect.height - th - 8)}px`;
+  tip.style.display = "flex";
+  const W = ui.stage.clientWidth, H = ui.stage.clientHeight;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  const x = ev.clientX, y = ev.clientY;
+  tip.style.left = `${x + 18 + tw > W - 8 ? x - tw - 18 : x + 18}px`;
+  tip.style.top = `${Math.min(Math.max(8, y - th / 2), H - th - 8)}px`;
 }
 
-function select(i, { fly: shouldFly = true } = {}) {
+// ---------- state changes ----------
+
+const hideHint = () => $("hint").classList.add("hidden");
+
+function select(i) {
+  hideHint();
   state.selected = i;
   recolor();
   renderPanel();
-  if (i >= 0 && shouldFly) flyTo(i);
+  if (i >= 0) {
+    setRotate(false);
+    flyToNode(i);
+  }
+}
+
+function setBreed(k) {
+  hideHint();
+  state.breed = k;
+  state.selected = -1;
+  ui.search.value = k >= 0 ? classes[k] : "";
+  recolor();
+  renderLegend();
+  renderPanel();
+  if (k >= 0) {
+    setRotate(false);
+    flyToBreed(k);
+  }
+}
+
+function setRotate(on) {
+  state.rotate = on;
+  controls.autoRotate = on;
+  ui.rotate.setAttribute("aria-pressed", String(on));
+}
+
+function setPhotos(on) {
+  state.photos = on;
+  ui.photos.setAttribute("aria-pressed", String(on && !ui.photos.disabled));
+  const u = nodes.material.uniforms;
+  u.uPhotosOn.value = photosActive() ? 1 : 0;
+}
+
+function setLinks(on) {
+  state.links = on;
+  ui.links.setAttribute("aria-pressed", String(on));
+  edges.visible = on;
+  updateHighlight();
 }
 
 // ---------- UI ----------
 
-function initControls() {
+function initUI() {
+  ui.subtitle.textContent = `${fmt(n)} photos · ${fmt(E)} links · CLIP ${params.model.split(" ")[0]}`;
+
   const canvas = renderer.domElement;
   let down = null;
   canvas.addEventListener("pointermove", (ev) => {
     if (ev.buttons) { setHovered(-1, ev); return; }
-    const rect = canvas.getBoundingClientRect();
-    setHovered(pick(ev.clientX - rect.left, ev.clientY - rect.top), ev);
+    setHovered(pick(ev.clientX, ev.clientY), ev);
   });
   canvas.addEventListener("pointerleave", (ev) => setHovered(-1, ev));
   canvas.addEventListener("pointerdown", (ev) => { down = [ev.clientX, ev.clientY]; });
   canvas.addEventListener("pointerup", (ev) => {
     if (!down || Math.hypot(ev.clientX - down[0], ev.clientY - down[1]) > 4) return;
-    const rect = canvas.getBoundingClientRect();
-    select(pick(ev.clientX - rect.left, ev.clientY - rect.top));
+    select(pick(ev.clientX, ev.clientY));
   });
   window.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape" && state.selected >= 0) select(-1);
+    if (ev.key !== "Escape" || ev.target === ui.search) return;
+    if (state.selected >= 0) select(-1);
+    else if (state.breed >= 0) setBreed(-1);
   });
 
-  const order = classes.map((_, k) => k).sort((a, b) => classes[a].localeCompare(classes[b]));
-  const counts = new Array(classes.length).fill(0);
-  labels.forEach((l) => counts[l]++);
-  for (const k of order) {
-    const opt = document.createElement("option");
-    opt.value = k;
-    opt.textContent = `${classes[k]} (${classSpecies[k]}, ${counts[k]})`;
-    breedSelect.append(opt);
+  for (const name of [...classes].sort((a, b) => a.localeCompare(b))) {
+    ui.breedList.append(el("option", { value: name }));
   }
-  breedSelect.addEventListener("change", () => {
-    state.breed = Number(breedSelect.value);
+  const findBreed = (text) => {
+    const q = text.trim().toLowerCase();
+    if (!q) return -1;
+    const idx = (pred) => classes.findIndex((c) => pred(c.toLowerCase()));
+    const exact = idx((c) => c === q);
+    if (exact >= 0) return exact;
+    const prefix = idx((c) => c.startsWith(q));
+    return prefix >= 0 ? prefix : idx((c) => c.includes(q));
+  };
+  ui.search.addEventListener("input", () => {
+    const exact = classes.findIndex((c) => c.toLowerCase() === ui.search.value.trim().toLowerCase());
+    if (exact >= 0 && exact !== state.breed) setBreed(exact);
+    else if (!ui.search.value && state.breed >= 0) setBreed(-1);
+  });
+  ui.search.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      const k = findBreed(ui.search.value);
+      if (k >= 0) setBreed(k);
+    } else if (ev.key === "Escape") {
+      setBreed(-1);
+      ui.search.blur();
+    }
+  });
+
+  ui.threshold.min = params.threshold;
+  ui.threshold.max = Math.max(params.threshold + 0.005, Math.ceil((w[0] ?? 1) * 200) / 200);
+  ui.threshold.value = params.threshold;
+  ui.threshold.addEventListener("input", () => {
+    state.threshold = Number(ui.threshold.value);
+    renderThreshold();
     recolor();
-    renderLegend();
     renderPanel();
   });
+  renderThreshold();
 
-  thresholdInput.min = params.threshold;
-  thresholdInput.max = Math.max(params.threshold + 0.005, Math.ceil((w[0] ?? 1) * 200) / 200);
-  thresholdInput.value = params.threshold;
-  thresholdInput.addEventListener("input", () => {
-    state.threshold = Number(thresholdInput.value);
-    recolor();
-    renderPanel();
-    renderStats();
+  ui.links.addEventListener("click", () => setLinks(!state.links));
+  ui.photos.addEventListener("click", () => setPhotos(!state.photos));
+  ui.rotate.addEventListener("click", () => setRotate(!state.rotate));
+  ui.reset.addEventListener("click", () => {
+    if (state.selected >= 0 || state.breed >= 0) setBreed(-1);
+    flyHome();
   });
-
-  $("showEdges").addEventListener("change", (ev) => {
-    state.showEdges = ev.target.checked;
-    lines.visible = highlight.visible = state.showEdges;
-  });
-  $("rotate").addEventListener("change", (ev) => { controls.autoRotate = ev.target.checked; });
-
-  renderLegend();
-  renderStats();
+  setRotate(state.rotate);
 }
 
-function renderStats() {
-  $("thresholdOut").value = state.threshold.toFixed(3);
-  $("stats").textContent = `${fmt(n)} images · ${fmt(visibleCount(state.threshold))} edges`;
-}
-
-function legendRow(color, text) {
-  const row = document.createElement("div");
-  const dot = document.createElement("span");
-  dot.className = "dot";
-  dot.style.background = `#${color.getHexString()}`;
-  row.append(dot, document.createTextNode(text));
-  return row;
-}
-
-function renderLegend() {
-  const legend = $("legend");
-  legend.replaceChildren();
-  if (state.breed >= 0) {
-    const count = labels.filter((l) => l === state.breed).length;
-    legend.append(
-      legendRow(theme.focus, `${classes[state.breed]} (${fmt(count)})`),
-      legendRow(theme.mutedPoint, "Other images"),
-    );
-  } else {
-    const cats = species.filter((s) => s === 0).length;
-    legend.append(legendRow(theme.cat, `Cats (${fmt(cats)})`), legendRow(theme.dog, `Dogs (${fmt(n - cats)})`));
-  }
+function renderThreshold() {
+  ui.thresholdOut.value = state.threshold.toFixed(3);
 }
 
 function el(tag, props = {}, ...children) {
-  const node = Object.assign(document.createElement(tag), props);
-  node.append(...children);
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (k === "style") Object.assign(node.style, v);
+    else if (k in node) node[k] = v;
+    else node.setAttribute(k, v);
+  }
+  node.append(...children.filter((c) => c != null && c !== false));
   return node;
 }
 
-function dl(rows) {
-  return el("dl", {}, ...rows.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: v })]));
+const swatch = (color) => el("span", { className: "dot", style: { background: `#${color.getHexString()}` } });
+const speciesColor = (k) => (classSpecies[k] === "cat" ? theme.cat : theme.dog);
+
+function renderLegend() {
+  const row = (color, text) => el("div", {}, swatch(color), text);
+  if (state.breed >= 0) {
+    ui.legend.replaceChildren(
+      row(theme.focus, `${classes[state.breed]} (${fmt(breedMembers[state.breed].length)})`),
+      row(theme.other, "Other photos"),
+    );
+  } else {
+    const cats = species.filter((s) => s === 0).length;
+    ui.legend.replaceChildren(row(theme.cat, `Cats (${fmt(cats)})`), row(theme.dog, `Dogs (${fmt(n - cats)})`));
+  }
 }
 
 function renderPanel() {
-  panel.replaceChildren(state.selected >= 0 ? selectionView(state.selected) : overviewView());
+  const view = state.selected >= 0 ? selectionView(state.selected) : state.breed >= 0 ? breedView(state.breed) : overviewView();
+  ui.panel.replaceChildren(...view);
+  ui.panel.scrollTop = 0;
+}
+
+function head(title, meta, onclose) {
+  const close = el("button", { className: "icon-btn close", "aria-label": "Close", onclick: onclose });
+  close.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8"/></svg>`;
+  return el("div", { className: "head" }, el("div", {}, el("h2", { textContent: title }), el("div", { className: "meta" }, ...meta)), close);
+}
+
+function statTiles(items) {
+  return el("div", { className: "tiles" }, ...items.map(([v, k]) =>
+    el("div", { className: "tile" }, el("div", { className: "v", textContent: v }), el("div", { className: "k", textContent: k }))));
+}
+
+function photoGrid(items) {
+  return el("div", { className: "grid" }, ...items.map(({ i, badge, caption }) =>
+    el("button", { onclick: () => select(i), "aria-label": `${classes[labels[i]]}${badge ? `, cosine ${badge}` : ""}` },
+      el("div", { className: "ph" },
+        el("img", { src: thumb(i), alt: "", loading: "lazy" }),
+        badge && el("span", { className: "badge", textContent: badge })),
+      el("div", { className: "cap", textContent: caption }))));
 }
 
 function overviewView() {
-  const count = visibleCount(state.threshold);
-  const degree = new Int32Array(n);
-  for (let r = 0; r < count; r++) { degree[src[r]]++; degree[dst[r]]++; }
-  const isolated = degree.reduce((acc, d) => acc + (d === 0 ? 1 : 0), 0);
-  const same = count ? sameBreedPrefix[count] / count : 0;
+  const count = visibleCount();
+  const deg = degreesAt();
+  const isolated = deg.reduce((acc, d) => acc + (d === 0 ? 1 : 0), 0);
+  const chips = (sp) => el("div", { className: "chips" }, ...classes
+    .map((name, k) => ({ name, k }))
+    .filter(({ k }) => classSpecies[k] === sp)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(({ name, k }) => el("button", { className: "chip", onclick: () => setBreed(k) },
+      swatch(speciesColor(k)), name, el("span", { className: "count", textContent: fmt(breedMembers[k].length) }))));
 
-  return el("div", {},
+  return [
     el("h2", { textContent: "Overview" }),
-    el("div", { className: "sub", textContent: "Each dot is a photo, placed by UMAP of its CLIP embedding. Lines join pairs whose cosine similarity is at least the slider value." }),
-    dl([
-      ["Images", fmt(n)],
-      ["Edges", fmt(count)],
-      ["Mean links per image", (2 * count / n).toFixed(1)],
-      ["Images with no links", fmt(isolated)],
-      ["Same-breed edges", `${(same * 100).toFixed(1)}%`],
-      ["Model", params.model],
-      ["Build threshold", `> ${params.threshold}${params.center ? " (mean-centered)" : ""}`],
-      ["Max proposals per image", params.maxDegree > 0 ? String(params.maxDegree) : "no cap"],
+    el("p", { textContent: "Every point is a photo, placed by UMAP of its CLIP embedding, so similar photos sit close together. Links join pairs whose cosine similarity clears the slider. Zoom in and the points turn into the photos themselves." }),
+    statTiles([
+      [fmt(n), "photos"],
+      [fmt(count), "links"],
+      [count ? pct(sameBreedPrefix[count] / count) : "–", "of links stay within a breed"],
+      [fmt(isolated), "photos with no link"],
     ]),
-    el("div", { className: "muted", textContent: "Click an image to list its most similar neighbors. Esc clears the selection." }),
-  );
+    el("h3", { textContent: "Cat breeds" }), chips("cat"),
+    el("h3", { textContent: "Dog breeds" }), chips("dog"),
+    el("div", { className: "foot", textContent: `${params.model} · built with cosine > ${params.threshold}, up to ${params.maxDegree || "∞"} links proposed per photo` }),
+  ];
+}
+
+function breedView(b) {
+  const members = breedMembers[b];
+  const deg = degreesAt();
+  const count = visibleCount();
+  let within = 0, across = 0;
+  const other = new Map();
+  for (let r = 0; r < count; r++) {
+    const la = labels[src[r]], lb = labels[dst[r]];
+    if (la === b && lb === b) within++;
+    else if (la === b || lb === b) {
+      across++;
+      const o = la === b ? lb : la;
+      other.set(o, (other.get(o) ?? 0) + 1);
+    }
+  }
+  const unlinked = members.filter((i) => deg[i] === 0).length;
+  const top = [...other].sort((x, y) => y[1] - x[1]).slice(0, 5);
+  const best = [...members].sort((x, y) => deg[y] - deg[x]).slice(0, 9);
+
+  return [
+    head(classes[b], [swatch(speciesColor(b)), `${speciesName(b)} · ${fmt(members.length)} photos`], () => setBreed(-1)),
+    statTiles([
+      [within + across ? pct(within / (within + across)) : "–", "of its links stay in the breed"],
+      [fmt(unlinked), "photos with no link"],
+    ]),
+    el("h3", { textContent: "Most often linked to" }),
+    top.length
+      ? el("div", { className: "rows" }, ...top.map(([k, c]) =>
+          el("button", { onclick: () => setBreed(k) }, el("span", { textContent: classes[k] }), el("span", { className: "count", textContent: `${fmt(c)} link${c === 1 ? "" : "s"}` }))))
+      : el("div", { className: "empty", textContent: "No links to other breeds at this threshold." }),
+    el("h3", { textContent: "Best-connected photos" }),
+    photoGrid(best.map((i) => ({ i, caption: `${deg[i]} link${deg[i] === 1 ? "" : "s"}` }))),
+  ];
 }
 
 function selectionView(i) {
   const nbs = neighborsOf(i);
-  const list = el("ul", { id: "neighbors" });
-  for (const { j, w: wj } of nbs) {
-    const li = el("li", { tabIndex: 0 },
-      el("img", { src: thumb(j), alt: "", loading: "lazy" }),
-      el("div", {},
-        el("div", { className: "val", textContent: wj.toFixed(3) }),
-        el("div", { className: "lbl", textContent: classes[labels[j]] + (labels[j] === labels[i] ? " · same breed" : "") }),
-      ),
-    );
-    const go = () => select(j);
-    li.addEventListener("click", go);
-    li.addEventListener("keydown", (ev) => { if (ev.key === "Enter") go(); });
-    list.append(li);
-  }
-
-  const clear = el("button", { className: "link", textContent: "Clear" });
-  clear.addEventListener("click", () => select(-1));
-
-  return el("div", {},
-    el("div", { className: "panel-head" }, el("h2", { textContent: classes[labels[i]] }), clear),
-    el("div", { className: "sub", textContent: `${classSpecies[labels[i]]} · image #${i}` }),
-    el("img", { id: "selImg", src: thumb(i), alt: classes[labels[i]] }),
-    el("div", { className: "sub", textContent: nbs.length
-      ? `${nbs.length} neighbor${nbs.length === 1 ? "" : "s"} with cosine ≥ ${state.threshold.toFixed(3)}`
-      : `No neighbors with cosine ≥ ${state.threshold.toFixed(3)}` }),
-    list,
-  );
+  const k = labels[i];
+  return [
+    head(classes[k], [swatch(speciesColor(k)), `${speciesName(k)} · photo #${i}`], () => select(-1)),
+    el("img", { className: "hero", src: thumb(i), alt: `${classes[k]} photo` }),
+    el("p", {}, el("button", { className: "link-btn", textContent: `Highlight all ${classes[k]} photos`, onclick: () => setBreed(k) })),
+    el("h3", { textContent: nbs.length ? `${nbs.length} most similar` : "Most similar" }),
+    nbs.length
+      ? photoGrid(nbs.map(({ j, w: wj }) => ({ i: j, badge: wj.toFixed(3), caption: classes[labels[j]] })))
+      : el("div", { className: "empty", textContent: `No photo is above ${state.threshold.toFixed(3)} cosine with this one. Lower the slider, or rebuild with a lower --threshold.` }),
+  ];
 }

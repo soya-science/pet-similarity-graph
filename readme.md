@@ -5,7 +5,7 @@ A 3D similarity graph of the [Oxford-IIIT Pets](https://www.robots.ox.ac.uk/~vgg
 - Each image is embedded with a pretrained CLIP model (open_clip `ViT-B-32`, `laion2b_s34b_b79k`). This is inference only; nothing is trained.
 - Two images are connected when the cosine similarity of their embeddings is above a threshold (default 0.8).
 - Node positions come from UMAP of the embeddings down to 3D. The edges are drawn on top.
-- The result is explored in the browser (three.js): hover for a thumbnail, click to list an image's neighbors.
+- The result is explored in the browser (three.js). Points turn into the photos themselves as you zoom in, which works by packing every thumbnail into one texture atlas, `web/atlas.jpg`. Search or click a breed to highlight it. Click a photo to fly to it and list its most similar photos.
 
 ## Run
 
@@ -27,5 +27,6 @@ Embeddings are cached in `cache/`, so re-running with a different threshold take
 | `--limit` | all | use a random subset of N images |
 | `--model`, `--pretrained` | `ViT-B-32`, `laion2b_s34b_b79k` | any open_clip model |
 | `--force-embed` | off | ignore the embedding cache |
+| `--umap-neighbors`, `--umap-min-dist` | `30`, `0.3` | UMAP layout settings. More neighbors keeps more global structure; a larger min-dist makes clusters less clumped |
 
 Every run prints the distribution of pairwise cosine scores and how many edges each threshold would produce, to help pick the cutoff.
